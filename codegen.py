@@ -54,7 +54,6 @@ def handle_func_entry(output, global_options, func_entry):
             args_decl += '{0}{1} {2}'.format('' if i == 0 else ', ', a[0], a[1])
         args_invk += '{0}{2}'.format('' if i == 0 else ', ', a[0], a[1])
 
-    # XXX: handle complex type
     if '(*)' in ret_type:
         func_header = '{0}({1}) {{'.format(ret_type.replace('(*)', '(*{})'.format(name)),  args_decl)
     else:
@@ -122,6 +121,8 @@ def handle_main_entry(output, main_entry):
     output['interposition_header_body'] = """\
 void {0}_inst_on(void);
 void {0}_inst_off(void);
+int  {0}_inst_save(void);
+void {0}_inst_restore(int);
 void {0}_inst_init(void);
 
 """.format(global_options['namespace'])
@@ -169,7 +170,8 @@ static __thread int {0}_use_inst = 0;
 
 void {0}_inst_on(void) {{ {0}_use_inst = 1; }}
 void {0}_inst_off(void) {{ {0}_use_inst = 0; }}
-
+int  {0}_inst_save(void) {{ int r = {0}_use_inst; {0}_use_inst = 0; return r; }}
+void {0}_inst_restore(int r) {{ {0}_use_inst = r; }}
 void {0}_inst_init(void) {{
 {2}}}
 
