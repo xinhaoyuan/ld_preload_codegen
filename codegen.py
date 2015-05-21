@@ -75,7 +75,7 @@ def handle_func_entry(output, global_options, func_entry):
             ret_type,
             args_decl)
     output['interposition_header_body'] += \
-        'extern {2} ({0}_inst_{1})({3});\n'.format(
+        'extern {2} {0}_inst_{1}({3});\n'.format(
             global_options['namespace'],
             name,
             ret_type,
