@@ -3,6 +3,7 @@
 import sys
 import getopt
 import json
+import ast
 
 USAGE = """\
 Usage: {0} -f input.json
@@ -188,8 +189,9 @@ void {0}_inst_init(void) {{
     
 
 def main(argv):
-    opts, args = getopt.getopt(argv[1:], 'hf:')
+    opts, args = getopt.getopt(argv[1:], 'hf:a')
     input_file = sys.stdin
+    use_ast = False
     
     try:
         for name, value in opts:
@@ -197,14 +199,19 @@ def main(argv):
                 sys.stderr.write(USAGE)
             elif name == '-f':
                 input_file = open(value)
+            elif name == '-a':
+                use_ast = True
     except Exception as x:
         sys.stderr.write('Error while handling options: {}\n'.format(x))
         return
 
     try:
-        data = json.load(input_file)
+        if use_ast:
+            data = ast.literal_eval(input_file.read())
+        else:
+            data = json.load(input_file)
     except Exception as x:
-        sys.stderr.write('Error while parse input as JSON: {}\n'.format(x))
+        sys.stderr.write('Error while parse input as {}: {}\n'.format("AST" if use_ast else "JSON", x))
         return
 
     output = {}
