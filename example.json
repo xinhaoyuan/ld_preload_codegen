@@ -1,0 +1,20 @@
+{
+    "header_filename" : "inst.h",
+    "source_filename" : "inst.c",
+    "namespace" : "test",
+    "incl" : [ "<pthread.h>", "<stdio.h>" ],
+    "functions" :
+    [
+        {
+            "name": "pthread_create",
+            "ret_type": "int",
+            "args": [
+                ["pthread_t *", "p"],
+                ["const pthread_attr_t *", "pa"],
+                ["void *(*)(void *)", "e"],
+                ["void *", "d"]
+            ],
+            "incl": [ "<pthread.h>", "<stdlib.h>" ]
+        }
+    ]
+}
