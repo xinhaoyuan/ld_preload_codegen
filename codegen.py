@@ -13,13 +13,11 @@ def handle_func_entry(output, global_options, func_entry):
     if not isinstance(func_entry, dict):
         raise Exception('Except a dict as the function entry')
 
-    if 'name' not in func_entry:
-        raise Exception('name is required in func_entry')
-    elif 'ret_type' not in func_entry:
-        raise Exception('ret_type is required in func_entry')
-    elif 'args' not in func_entry or\
-         not isinstance(func_entry['args'], list):
-        raise Exception('args is required list in func_entry')
+    if 'prototype' not in func_entry or\
+         not isinstance(func_entry['prototype'], list):
+        raise Exception('prototype is required list in func_entry')
+    elif len(func_entry['prototype']) < 1:
+        raise Exception('prototype should contain at least the function itself')
     elif 'opts' in func_entry and\
          not isinstance(func_entry['opts'], list):
         raise Exception('opts in func_entry should be a list')
@@ -33,8 +31,6 @@ def handle_func_entry(output, global_options, func_entry):
                 raise Exception('incl in func_entry should contains strings')
             output['interposition_incl_set'].add(i)
 
-    name = func_entry['name']
-    ret_type = func_entry['ret_type']
     opts = set()
     if 'opts' in func_entry:
         for o in func_entry['opts']:
@@ -44,16 +40,23 @@ def handle_func_entry(output, global_options, func_entry):
 
     args_decl = ''
     args_invk = ''
-    for i, a in enumerate(func_entry['args']):
-        if not isinstance(a, list) or\
-           len(a) != 2 or\
-           not isinstance(a[1], str):
+    for i, p in enumerate(func_entry['prototype']):
+        if not isinstance(p, list) or\
+           len(p) != 2 or\
+           not isinstance(p[0], str) or\
+           not isinstance(p[1], str):
             raise Exception('item of args should be [ type, name ]')
-        if '(*)' in a[0]:
-            args_decl += '{0}{1}'.format('' if i == 0 else ', ', a[0].replace('(*)', '(*{})'.format(a[1])))
+
+        if i == 0:
+            ret_type = p[0]
+            name = p[1]
+            continue
+
+        if '(*)' in p[0]:
+            args_decl += '{0}{1}'.format(', ' if i > 1 else '', p[0].replace('(*)', '(*{})'.format(p[1])))
         else:
-            args_decl += '{0}{1} {2}'.format('' if i == 0 else ', ', a[0], a[1])
-        args_invk += '{0}{2}'.format('' if i == 0 else ', ', a[0], a[1])
+            args_decl += '{0}{1} {2}'.format(', ' if i > 1 else '', p[0], p[1])
+        args_invk += '{0}{2}'.format(', ' if i > 1 else '', p[0], p[1])
 
     if '(*)' in ret_type:
         func_header = '{0}({1}) {{'.format(ret_type.replace('(*)', '(*{})'.format(name)),  args_decl)
@@ -66,7 +69,8 @@ def handle_func_entry(output, global_options, func_entry):
     }}
     else
         {0}_orig_{1}({2});
-}}""".format(global_options['namespace'], name, args_invk, func_header)
+}}
+""".format(global_options['namespace'], name, args_invk, func_header)
 
     output['interposition_header_body'] += \
         'extern {2} (*{0}_orig_{1})({3});\n'.format(
