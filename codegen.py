@@ -1,225 +1,315 @@
-#!/usr/bin/env python3
+'''
+A code generator for LD_PRELOAD wrapper.
 
-import sys
-import getopt
-import json
-import ast
+Author: Xinhao Yuan <xinhaoyuan@gmail.com>
 
-USAGE = """\
-Usage: {0} -f input.json
-""".format(sys.argv[0])
+Generates a standalone GCC project for instrumenting function by
+symbol names (with optional versions).
+'''
 
-def handle_func_entry(output, global_options, func_entry):
-    if not isinstance(func_entry, dict):
-        raise Exception('Except a dict as the function entry')
+import os, sys
+from typing import Union
 
-    if 'prototype' not in func_entry or\
-         not isinstance(func_entry['prototype'], list):
-        raise Exception('prototype is required list in func_entry')
-    elif len(func_entry['prototype']) < 1:
-        raise Exception('prototype should contain at least the function itself')
-    elif 'opts' in func_entry and\
-         not isinstance(func_entry['opts'], list):
-        raise Exception('opts in func_entry should be a list')
-    elif 'incl' in func_entry and\
-         not isinstance(func_entry['incl'], list):
-        raise Exception('incl in func_entry should be a list')
+HEADER_PROLOGUE_TEMPLATE = '''\
+#ifndef __{namespace}_inst_h__
+#define __{namespace}_inst_h__
 
-    if 'incl' in func_entry:
-        for i in func_entry['incl']:
-            if not isinstance(i, str):
-                raise Exception('incl in func_entry should contains strings')
-            output['interposition_incl_set'].add(i)
-
-    opts = set()
-    if 'opts' in func_entry:
-        for o in func_entry['opts']:
-            if not isinstance(o, str):
-                raise Exception('opts in func_entry should contains strings')
-            opts.add(o)
-
-    args_decl = ''
-    args_invk = ''
-    for i, p in enumerate(func_entry['prototype']):
-        if not isinstance(p, list) or\
-           len(p) != 2 or\
-           not isinstance(p[0], str) or\
-           not isinstance(p[1], str):
-            raise Exception('item of args should be [ type, name ]')
-
-        if i == 0:
-            ret_type = p[0]
-            name = p[1]
-            continue
-
-        if '(*)' in p[0]:
-            args_decl += '{0}{1}'.format(', ' if i > 1 else '', p[0].replace('(*)', '(*{})'.format(p[1])))
-        else:
-            args_decl += '{0}{1} {2}'.format(', ' if i > 1 else '', p[0], p[1])
-        args_invk += '{0}{2}'.format(', ' if i > 1 else '', p[0], p[1])
-
-    if '(*)' in ret_type:
-        func_header = '{0}({1}) {{'.format(ret_type.replace('(*)', '(*{})'.format(name)),  args_decl)
-    else:
-        func_header = '{0} {1}({2}) {{'.format(ret_type, name, args_decl)
-    output['interposition_source_body'] += \
-        """{3}
-    if ({0}_use_inst) {{
-        {0}_use_inst = 0; {0}_inst_{1}({2}); {0}_use_inst = 1;
-    }}
-    else
-        {0}_orig_{1}({2});
-}}
-""".format(global_options['namespace'], name, args_invk, func_header)
-
-    output['interposition_header_body'] += \
-        'extern {2} (*{0}_orig_{1})({3});\n'.format(
-            global_options['namespace'],
-            name,
-            ret_type,
-            args_decl)
-    output['interposition_header_body'] += \
-        'extern {2} {0}_inst_{1}({3});\n'.format(
-            global_options['namespace'],
-            name,
-            ret_type,
-            args_decl)
-
-
-    output['interposition_source_header'] += \
-        '{2} (*{0}_orig_{1})({3}) = (void *)0;\n'.format(
-            global_options['namespace'],
-            name,
-            ret_type,
-            args_decl)
-    
-    output['interposition_source_init_func_body'] += \
-        '    {0}_orig_{1} = dlsym(RTLD_NEXT, "{1}");\n'.format(
-            global_options['namespace'],
-            name)
-    
-
-def handle_main_entry(output, main_entry):
-    if not isinstance(main_entry, dict):
-        raise Exception('expect a list as the main entry')
-    elif 'functions' not in main_entry:
-        raise Exception('functions list is required in the main entry')
-    elif 'namespace' in main_entry and \
-       not isinstance(main_entry['namespace'], str):
-        raise Exception('except namespace in main entry to be a string')
-    elif 'incl' in main_entry and\
-         not isinstance(main_entry['incl'], list):
-        raise Exception('incl in main_entry should be a list')
-    elif 'header_filename' not in main_entry or\
-         not isinstance(main_entry['header_filename'], str):
-        raise Exception('header_filename in main_entry should be a string')
-    elif 'source_filename' not in main_entry or\
-         not isinstance(main_entry['source_filename'], str):
-        raise Exception('source_filename in main_entry should be a string')
-
-    global_options = {}
-    global_options['namespace'] \
-        = main_entry['namespace'] if 'namespace' in main_entry else ''
-    global_options['header_filename'] = main_entry['header_filename']
-    global_options['source_filename'] = main_entry['source_filename']
-
-    output['interposition_header_body'] = """\
-void {0}_inst_on(void);
-void {0}_inst_off(void);
-int  {0}_inst_save(void);
-void {0}_inst_restore(int);
-void {0}_inst_init(void);
-
-""".format(global_options['namespace'])
-
-    output['interposition_incl_set'] = set()
-    if 'incl' in main_entry:
-        for i in main_entry['incl']:
-            if not isinstance(i, str):
-                raise Exception('incl in main_entry should contains strings')
-            output['interposition_incl_set'].add(i)
-
-    output['interposition_source_header'] = ''
-    output['interposition_source_init_func_body'] = ''
-    output['interposition_source_body'] = ''
-
-    for func_entry in main_entry['functions']:
-        handle_func_entry(output, global_options, func_entry)
-
-    header_output  = """\
-#ifndef __{0}_INTERPOSITION_H__
-#define __{0}_INTERPOSITION_H__
-
-#if __cplusplus
+#ifdef __cplusplus
 extern "C" {{
 #endif
-""".format(global_options['namespace'])
-    header_output += '\n'.join(
-        [ '#include {0}'.format(i) for i in output['interposition_incl_set'] ])
-    header_output += '\n\n' + output['interposition_header_body']
-    header_output += """
-#if __cplusplus
+
+{includes}
+
+void {namespace}_sys_init(void);
+void {namespace}_sys_thread_init(void);
+void {namespace}_sys_inst_on(void);
+void {namespace}_sys_inst_off(void);
+
+'''
+
+HEADER_FINALE_CONTENT = '''\
+#ifdef __cplusplus
 }
 #endif
 #endif
-"""
+'''
 
-    source_output  = """\
+ENTRY_FUNC_TEMPLATE = '''\
+{return_type} {entry_func_name}({args_decl_list}) {{
+  {namespace}_sys_try_init();
+  if ({namespace}_sys_inst_on) {{
+    {namespace}_sys_flag_inst_on = 0;
+    {save_return_value}{inst_func_name}({args_call_list});
+    {namespace}_sys_flag_inst_on = 1;
+    {return_saved_value}
+  }}
+  else {{
+    {return_if_needed}{original_var_name}({args_call_list});
+  }}
+}}
+'''
+
+SOURCE_PROLOGUE_TEMPLATE = '''\
 #define _GNU_SOURCE
 #include <dlfcn.h>
-#include "{0}"
-""".format(global_options['header_filename'])
-    source_output += """
-{1}
-static __thread int {0}_use_inst = 0;
+#include <pthread.h>
 
-void {0}_inst_on(void) {{ {0}_use_inst = 1; }}
-void {0}_inst_off(void) {{ {0}_use_inst = 0; }}
-int  {0}_inst_save(void) {{ int r = {0}_use_inst; {0}_use_inst = 0; return r; }}
-void {0}_inst_restore(int r) {{ {0}_use_inst = r; }}
-void {0}_inst_init(void) {{
-{2}}}
+#include "{header_filename}"
 
-{3}""".format(global_options['namespace'],
-            output['interposition_source_header'],
-            output['interposition_source_init_func_body'],
-            output['interposition_source_body'])
+static          volatile int {namespace}_sys_flag_init = 0;
+static __thread volatile int {namespace}_sys_flag_thread_init = 0;
+static __thread volatile int {namespace}_sys_flag_inst_on = 0;
 
-    with open(global_options['header_filename'], 'w') as f:
-        f.write(header_output)
-    
-    with open(global_options['source_filename'], 'w') as f:
-        f.write(source_output)
-    
+{original_vars}
 
-def main(argv):
-    opts, args = getopt.getopt(argv[1:], 'hf:a')
-    input_file = sys.stdin
-    use_ast = False
-    
-    try:
-        for name, value in opts:
-            if name == '-h':
-                sys.stderr.write(USAGE)
-            elif name == '-f':
-                input_file = open(value)
-            elif name == '-a':
-                use_ast = True
-    except Exception as x:
-        sys.stderr.write('Error while handling options: {}\n'.format(x))
-        return
+void {namespace}_sys_inst_on(void) {{ {namespace}_sys_flag_inst_on = 1; }}
+void {namespace}_sys_inst_off(void) {{ {namespace}_sys_flag_inst_on = 0; }}
+int  {namespace}_sys_inst_save(int nr) {{ int r = {namespace}_sys_flag_inst_on; {namespace}_sys_flag_inst_on = nr; return r; }}
+void {namespace}_sys_inst_restore(int r) {{ {namespace}_sys_flag_inst_on = r; }}
+void {namespace}_sys_try_init() {{
+  int r = {namespace}_sys_inst_save(0);
 
-    try:
-        if use_ast:
-            data = ast.literal_eval(input_file.read())
+  int _{namespace}_sys_flag_init;
+  __atomic_load(&{namespace}_sys_flag_init, &_{namespace}_sys_flag_init, __ATOMIC_ACQUIRE);
+
+  while (_{namespace}_sys_flag_init != 2) {{
+    asm volatile("pause\\n": : :"memory");
+    _{namespace}_sys_flag_init = 0;
+    int cas = __atomic_compare_exchange_n(&{namespace}_sys_flag_init, &_{namespace}_sys_flag_init, 1, 1, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    if (cas) break;
+  }}
+
+  if (_{namespace}_sys_flag_init == 2)
+    goto skip_global;
+
+  {init_original_body_indented[2]}
+
+  {namespace}_sys_init();
+  __atomic_store_n(&{namespace}_sys_flag_init, 2, __ATOMIC_RELEASE);
+
+skip_global:
+
+  if ({namespace}_sys_flag_thread_init == 0) {{
+    {namespace}_sys_flag_thread_init = 1;
+    {namespace}_sys_thread_init();
+  }}
+  {namespace}_sys_inst_restore(r);
+}}
+'''
+
+MAKEFILE_TEMPLATE = '''\
+.PHONY: all
+
+CC ?= gcc
+CCFLAGS ?= -O2
+
+all: inst.so
+
+{basename}.so: {basename}.c {basename}.h
+	${{CC}} ${{CCFLAGS}} -shared -fPIC -lpthread {version_options} -o $@ {basename}.c
+'''
+
+class StringIndenter:
+    def __init__(self, contents):
+        self._content = contents
+        pass
+
+    def __getitem__(self, key):
+        assert(type(key) == int)
+        return self._content.replace('\n', '\n' + ' ' * key)
+
+class CodeGen:
+
+    def __init__(self, namespace : str):
+        self._namespace = namespace
+        self._includes = []
+        self._header_body = ''
+        self._source_body = ''
+        self._original_vars = ''
+        self._init_original_body = ''
+        self._version_to_id_map = {}
+        self._versioned_functions = {}
+        self._typedefs = {}
+        pass
+
+    def _get_version_id(self, version : str) -> str:
+        if version in self._version_to_id_map:
+            return self._version_to_id_map[version]
         else:
-            data = json.load(input_file)
-    except Exception as x:
-        sys.stderr.write('Error while parse input as {}: {}\n'.format("AST" if use_ast else "JSON", x))
-        return
+            ret = len(self._version_to_id_map)
+            self._version_to_id_map[version] = ret
+            return ret
+        pass
 
-    output = {}
-    handle_main_entry(output, data)
-    
+    def _get_internal_name(self, original_name : str, version : Union[None, str]) -> str:
+        if version is None:
+            return original_name + '__'
+        else:
+            return original_name + '_' + str(self._get_version_id(version))
+        pass
+
+    def _get_original_var_decl(self, prototype : [(str, str)], name : str) -> str:
+        assert(len(prototype) > 0)
+        args_decl_list = []
+        for arg_index in range(1, len(prototype)):
+            args_decl_list.append('{} {}'.format(prototype[arg_index][0], prototype[arg_index][1]))
+        return '{return_type}(*{name})({args_list})'.format(return_type = prototype[0][0], name = name, args_list = ', '.join(args_decl_list))
+
+    def _get_original_var_call(self, prototype : [(str, str)], name : str) -> str:
+        assert(len(prototype) > 0)
+        return '{name}({args_list})'.format(name = name, args_list = ', '.join([arg_pair[1] for arg_pair in prototype[1:]]))
+
+    def _get_inst_func_decl(self, prototype : [(str, str)], name : str) -> str:
+        assert(len(prototype) > 0)
+        args_decl_list = []
+        for arg_index in range(1, len(prototype)):
+            args_decl_list.append('{} {}'.format(prototype[arg_index][0], prototype[arg_index][1]))
+        return '{return_type} {name}({args_list})'.format(return_type = prototype[0][0], name = name, args_list = ', '.join(args_decl_list))
+
+    def _get_internal_type(self, type_decl : str) -> str:
+        if '(*)' not in type_decl:
+            return type_decl
+        if type_decl in self._typedefs:
+            return self._typedefs[type_decl]
+        index = len(self._typedefs)
+        internal_type = '{}_internal_type_{}'.format(self._namespace, index)
+        self._header_body += 'typedef {};\n'.format(type_decl.replace('(*)', '(*{})'.format(internal_type), 1))
+        self._typedefs[type_decl] = internal_type
+        return internal_type
+
+    def add_include(self, include_file : str):
+        self._includes.append(include_file)
+        pass
+
+    def add_function(self, prototype : [(str, str)], includes : [str] = [], inst_name : Union[None, str] = None, version_label : Union[None, str] = None):
+        assert(len(prototype) > 0)
+        for index in range(len(prototype)):
+            prototype[index] = (self._get_internal_type(prototype[index][0]), prototype[index][1])
+            pass
+
+        if version_label is None:
+            version = None
+        else:
+            version = version_label.replace('@', '')
+        internal_name = self._get_internal_name(prototype[0][1], version) if inst_name is None else inst_name
+        original_var_name = '{namespace}_orig_{internal_name}'.format(
+            namespace = self._namespace,
+            internal_name = internal_name)
+        entry_func_name = '{namespace}_entry_{internal_name}'.format(
+            namespace = self._namespace,
+            internal_name = internal_name)
+        inst_func_name = '{namespace}_inst_{internal_name}'.format(
+            namespace = self._namespace,
+            internal_name = internal_name)
+
+        self._header_body += 'extern {};\n'.format(self._get_original_var_decl(prototype, original_var_name))
+        self._header_body += '{};\n'.format(self._get_inst_func_decl(prototype, inst_func_name))
+        self._original_vars += '{} = (void*)0;\n'.format(self._get_original_var_decl(prototype, original_var_name))
+
+        if version is None:
+            lookup_call = 'dlsym(RTLD_NEXT, "{original_name}")'.format(
+                original_name = prototype[0][1])
+        else:
+            lookup_call = 'dlvsym(RTLD_NEXT, "{original_name}", "{version}")'.format(
+                original_name = prototype[0][1],
+                version = version)
+        self._init_original_body += '{original_var} = {lookup_call};\n'.format(
+            original_var = original_var_name,
+            lookup_call = lookup_call)
+
+        self._source_body += ENTRY_FUNC_TEMPLATE.format(
+            return_type = prototype[0][0],
+            namespace = self._namespace,
+            original_var_name = original_var_name,
+            entry_func_name = entry_func_name,
+            inst_func_name = inst_func_name,
+            args_decl_list = ', '.join(['{} {}'.format(arg_pair[0], arg_pair[1]) for arg_pair in prototype[1:]]),
+            args_call_list = ', '.join([arg_pair[1] for arg_pair in prototype[1:]]),
+            save_return_value = '{return_type} {namespace}_ret_value = '.format(
+                return_type = prototype[0][0], namespace = self._namespace) if prototype[0][0] != 'void' else '',
+            return_saved_value = 'return {namespace}_ret_value;'.format(
+                return_type = prototype[0][0], namespace = self._namespace) if prototype[0][0] != 'void' else '',
+            return_if_needed = '' if prototype[0][0] == 'void' else 'return ',
+        )
+
+        if version is not None:
+            self._source_body += '__asm__(".symver {entry_func_name}, {symbol_name}");'.format(
+                entry_func_name = entry_func_name,
+                symbol_name = '{}@{}'.format(prototype[0][1], version_label))
+            if version not in self._versioned_functions:
+                self._versioned_functions[version] = []
+                pass
+            self._versioned_functions[version].append(prototype[0][1])
+
+        pass
+
+    def get_header_contents(self) -> str:
+        return '{prologue}\n{body}\n{finale}'.format(
+            prologue = HEADER_PROLOGUE_TEMPLATE.format(
+                namespace = self._namespace,
+                includes = '\n'.join(['#include {}'.format(include_file) for include_file in self._includes])),
+            body = self._header_body,
+            finale = HEADER_FINALE_CONTENT)
+
+    def get_source_contents(self, header_filename : str) -> str:
+        return '{prologue}\n{body}'.format(
+            prologue = SOURCE_PROLOGUE_TEMPLATE.format(
+                namespace = self._namespace,
+                header_filename = header_filename,
+                original_vars = self._original_vars,
+                init_original_body_indented = StringIndenter(self._init_original_body)
+                ),
+            body = self._source_body)
+
+    def get_version_contents(self) -> str:
+        contents = ''
+        for v in self._versioned_functions:
+            contents += '{version} {{ global : {functions}; }};\n'.format(
+                version = v,
+                functions = '; '.join(self._versioned_functions[v]))
+            pass
+        return contents
+
+    def generate(self, output_dir : str, basename : str = 'inst', version_filename : str = 'version.txt', makefile : bool = True):
+        try:
+            os.makedirs(output_dir)
+        except FileExistsError:
+            pass
+        except:
+            raise
+        header_filename = '{}.h'.format(basename)
+        source_filename = '{}.c'.format(basename)
+        with open(os.path.join(output_dir, header_filename), 'w') as f:
+            f.write(self.get_header_contents())
+            pass
+        with open(os.path.join(output_dir, source_filename), 'w') as f:
+            f.write(self.get_source_contents(header_filename))
+            pass
+        version_contents = self.get_version_contents()
+        if len(version_contents) > 0:
+            with open(os.path.join(output_dir, version_filename), 'w') as f:
+                f.write(version_contents)
+                pass
+            has_version = True
+            pass
+        if makefile:
+            with open(os.path.join(output_dir, 'Makefile'), 'w') as f:
+                f.write(MAKEFILE_TEMPLATE.format(
+                    basename = basename,
+                    version_options = '' if not has_version else '-Wl,--version-script -Wl,{}'.format(version_filename)))
+                pass
+            pass
+        pass
+
+    pass
+
+def run_tests():
+    code_gen = CodeGen('ns')
+    code_gen.add_include('<stdio.h>')
+    code_gen.add_function([('int', 'x'), ('int', 'y'), ('int', 'z')])
+    code_gen.add_function([('void(*)(int)', 'foo'), ('int', 'bar')], version_label = '@GLIBC_2.0')
+    code_gen.generate('out')
+    pass
+
 if __name__ == '__main__':
-    main(sys.argv)
+    run_tests()
