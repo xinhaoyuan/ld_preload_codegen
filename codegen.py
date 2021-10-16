@@ -105,8 +105,11 @@ CCFLAGS ?= -O2
 
 all: inst.so
 
-{basename}.so: {basename}.c {basename}.h
-	${{CC}} ${{CCFLAGS}} -shared -fPIC -lpthread {version_options} -o $@ {basename}.c
+{basename}.o: {basename}.c {basename}.h
+	${{CC}} ${{CCFLAGS}} -fPIC {version_options} -c -o $@ {basename}.c
+
+{basename}.so: {basename}.o
+	${{CC}} ${{CCFLAGS}} -shared -fPIC -lpthread {version_options} -o $@ {basename}.o
 '''
 
 class StringIndenter:
@@ -195,9 +198,12 @@ class CodeGen:
         original_var_name = '{namespace}_orig_{internal_name}'.format(
             namespace = self._namespace,
             internal_name = internal_name)
-        entry_func_name = '{namespace}_entry_{internal_name}'.format(
-            namespace = self._namespace,
-            internal_name = internal_name)
+        if version is None:
+            entry_func_name = prototype[0][1]
+        else:
+            entry_func_name = '{namespace}_entry_{internal_name}'.format(
+                namespace = self._namespace,
+                internal_name = internal_name)
         inst_func_name = '{namespace}_inst_{internal_name}'.format(
             namespace = self._namespace,
             internal_name = internal_name)
@@ -286,6 +292,7 @@ class CodeGen:
             f.write(self.get_source_contents(header_filename))
             pass
         version_contents = self.get_version_contents()
+        has_version = False
         if len(version_contents) > 0:
             with open(os.path.join(output_dir, version_filename), 'w') as f:
                 f.write(version_contents)
